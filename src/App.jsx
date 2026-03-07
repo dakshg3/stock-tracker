@@ -101,14 +101,22 @@ export default function App() {
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
   useEffect(() => { savePortfolio(portfolio); }, [portfolio]);
 
-  // ── Auto-push to Gist (debounced) ──
+  // ── Auto-push to Gist (debounced) with merge support ──
   useEffect(() => {
     if (!syncConfigured) return;
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
       try {
         setSyncStatus("syncing");
-        await pushToGist(watchlist, portfolio);
+        const result = await pushToGist(watchlist, portfolio);
+
+        // If a merge occurred (remote had newer changes), apply the merged
+        // state locally so deletes/adds from the other device take effect.
+        if (result.merged) {
+          setWatchlist(result.merged.watchlist);
+          setPortfolio(result.merged.portfolio);
+        }
+
         setSyncStatus("synced");
         // fade the "synced" indicator after 3s
         setTimeout(() => setSyncStatus(""), 3000);
