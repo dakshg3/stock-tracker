@@ -5,6 +5,7 @@ import StockDetail from "./components/StockDetail";
 import CsvManager from "./components/CsvManager";
 import AddPortfolioStock from "./components/AddPortfolioStock";
 import PortfolioTable from "./components/PortfolioTable";
+import SyncSettings from "./components/SyncSettings";
 import {
   fetchStockQuotes,
   loadWatchlist,
@@ -12,6 +13,7 @@ import {
   loadPortfolio,
   savePortfolio,
 } from "./services/stockApi";
+import { isSyncConfigured, pushToGist, pullFromGist } from "./services/gistSync";
 
 const REFRESH_INTERVAL = 30_000; // 30 seconds
 
@@ -48,7 +50,10 @@ export default function App() {
   const [portfolioQuotes, setPortfolioQuotes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(""); // "" | "syncing" | "synced" | "error"
   const timerRef = useRef(null);
+  const syncTimerRef = useRef(null);
   const { page, symbol, goToStock, goToWatchlist, goToPortfolio } = useHashRoute();
 
   // ── Fetch watchlist quotes ──
@@ -95,6 +100,35 @@ export default function App() {
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
   useEffect(() => { savePortfolio(portfolio); }, [portfolio]);
 
+  // ── Auto-push to Gist (debounced) ──
+  useEffect(() => {
+    if (!isSyncConfigured()) return;
+    clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(async () => {
+      try {
+        setSyncStatus("syncing");
+        await pushToGist(watchlist, portfolio);
+        setSyncStatus("synced");
+      } catch {
+        setSyncStatus("error");
+      }
+    }, 2000); // 2s debounce
+    return () => clearTimeout(syncTimerRef.current);
+  }, [watchlist, portfolio]);
+
+  // ── Auto-pull from Gist on first load ──
+  useEffect(() => {
+    if (!isSyncConfigured()) return;
+    pullFromGist()
+      .then((data) => {
+        if (data) {
+          if (data.watchlist.length > 0) setWatchlist(data.watchlist);
+          if (data.portfolio.length > 0) setPortfolio(data.portfolio);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // ── Watchlist handlers ──
   const addStock = (symbol) => setWatchlist((prev) => [...prev, symbol]);
   const removeStock = (symbol) => {
@@ -132,6 +166,12 @@ export default function App() {
 
   const isDashboard = page === "watchlist" || page === "portfolio";
 
+  // ── Handle pull from SyncSettings ──
+  const handleSyncPull = (data) => {
+    if (data.watchlist?.length > 0) setWatchlist(data.watchlist);
+    if (data.portfolio?.length > 0) setPortfolio(data.portfolio);
+  };
+
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       {/* Header */}
@@ -156,6 +196,21 @@ export default function App() {
                 mode={page}
               />
             )}
+            <button
+              onClick={() => setShowSettings(true)}
+              className={`p-2 rounded-lg transition-colors cursor-pointer ${
+                isSyncConfigured()
+                  ? "text-green-400 hover:bg-green-500/10"
+                  : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+              }`}
+              title="Cloud Sync Settings"
+            >
+              {syncStatus === "syncing" ? (
+                <span className="inline-block w-4 h-4 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin" />
+              ) : (
+                <span className="text-lg">☁️</span>
+              )}
+            </button>
             <div className="text-xs text-gray-500 flex items-center gap-2">
               {lastUpdated && (
                 <>
@@ -232,6 +287,16 @@ export default function App() {
       <footer className="text-center text-xs text-gray-600 py-6 border-t border-gray-800">
         Data sourced from Yahoo Finance • Prices may be delayed up to 15 min
       </footer>
+
+      {/* Sync settings modal */}
+      {showSettings && (
+        <SyncSettings
+          watchlist={watchlist}
+          portfolio={portfolio}
+          onPull={handleSyncPull}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
     </div>
   );
 }
