@@ -52,6 +52,7 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(""); // "" | "syncing" | "synced" | "error"
+  const [syncConfigured, setSyncConfigured] = useState(() => isSyncConfigured());
   const timerRef = useRef(null);
   const syncTimerRef = useRef(null);
   const { page, symbol, goToStock, goToWatchlist, goToPortfolio } = useHashRoute();
@@ -102,32 +103,37 @@ export default function App() {
 
   // ── Auto-push to Gist (debounced) ──
   useEffect(() => {
-    if (!isSyncConfigured()) return;
+    if (!syncConfigured) return;
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
       try {
         setSyncStatus("syncing");
         await pushToGist(watchlist, portfolio);
         setSyncStatus("synced");
+        // fade the "synced" indicator after 3s
+        setTimeout(() => setSyncStatus(""), 3000);
       } catch {
         setSyncStatus("error");
       }
     }, 2000); // 2s debounce
     return () => clearTimeout(syncTimerRef.current);
-  }, [watchlist, portfolio]);
+  }, [watchlist, portfolio, syncConfigured]);
 
   // ── Auto-pull from Gist on first load ──
   useEffect(() => {
-    if (!isSyncConfigured()) return;
+    if (!syncConfigured) return;
+    setSyncStatus("syncing");
     pullFromGist()
       .then((data) => {
         if (data) {
           if (data.watchlist.length > 0) setWatchlist(data.watchlist);
           if (data.portfolio.length > 0) setPortfolio(data.portfolio);
         }
+        setSyncStatus("synced");
+        setTimeout(() => setSyncStatus(""), 3000);
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => setSyncStatus("error"));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Watchlist handlers ──
   const addStock = (symbol) => setWatchlist((prev) => [...prev, symbol]);
@@ -166,12 +172,6 @@ export default function App() {
 
   const isDashboard = page === "watchlist" || page === "portfolio";
 
-  // ── Handle pull from SyncSettings ──
-  const handleSyncPull = (data) => {
-    if (data.watchlist?.length > 0) setWatchlist(data.watchlist);
-    if (data.portfolio?.length > 0) setPortfolio(data.portfolio);
-  };
-
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       {/* Header */}
@@ -199,14 +199,18 @@ export default function App() {
             <button
               onClick={() => setShowSettings(true)}
               className={`p-2 rounded-lg transition-colors cursor-pointer ${
-                isSyncConfigured()
+                syncConfigured
                   ? "text-green-400 hover:bg-green-500/10"
                   : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
               }`}
-              title="Cloud Sync Settings"
+              title={syncConfigured ? "Cloud Sync — connected" : "Set up Cloud Sync"}
             >
               {syncStatus === "syncing" ? (
                 <span className="inline-block w-4 h-4 border-2 border-gray-600 border-t-blue-400 rounded-full animate-spin" />
+              ) : syncStatus === "synced" ? (
+                <span className="text-green-400 text-sm">☁️ ✓</span>
+              ) : syncStatus === "error" ? (
+                <span className="text-red-400 text-sm">☁️ ✕</span>
               ) : (
                 <span className="text-lg">☁️</span>
               )}
@@ -291,10 +295,8 @@ export default function App() {
       {/* Sync settings modal */}
       {showSettings && (
         <SyncSettings
-          watchlist={watchlist}
-          portfolio={portfolio}
-          onPull={handleSyncPull}
           onClose={() => setShowSettings(false)}
+          onTokenChange={() => setSyncConfigured(isSyncConfigured())}
         />
       )}
     </div>

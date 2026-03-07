@@ -40,8 +40,33 @@ function headers() {
 /* ── Sync operations ── */
 
 /**
- * Push local data to Gist. Creates a new private Gist if none exists,
- * otherwise updates the existing one.
+ * Search the user's gists for one that contains our data file.
+ * This ensures all devices find and reuse the same gist.
+ * Returns the gist ID if found, or null.
+ */
+async function findExistingGist() {
+  // Check up to 3 pages (30 gists per page = 90 gists)
+  for (let page = 1; page <= 3; page++) {
+    const { data } = await axios.get(GIST_API, {
+      headers: headers(),
+      params: { per_page: 30, page },
+    });
+
+    if (data.length === 0) break;
+
+    for (const gist of data) {
+      if (gist.files?.[FILENAME]) {
+        setGistId(gist.id);
+        return gist.id;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Push local data to Gist. Finds an existing gist first, creates a
+ * new private Gist only if none exists across any device.
  */
 export async function pushToGist(watchlist, portfolio) {
   const content = JSON.stringify({ watchlist, portfolio }, null, 2);
@@ -65,7 +90,13 @@ export async function pushToGist(watchlist, portfolio) {
       throw err;
     }
   } else {
-    // Create new private gist
+    // Try to find an existing gist before creating a new one
+    const existingId = await findExistingGist();
+    if (existingId) {
+      return pushToGist(watchlist, portfolio); // retry, now with gistId set
+    }
+
+    // Create new private gist only if none exists anywhere
     const { data } = await axios.post(
       GIST_API,
       {
@@ -85,8 +116,13 @@ export async function pushToGist(watchlist, portfolio) {
  * no gist exists yet.
  */
 export async function pullFromGist() {
-  const gistId = getGistId();
-  if (!gistId) return null;
+  let gistId = getGistId();
+
+  // If no gist ID stored locally, try to discover one
+  if (!gistId) {
+    gistId = await findExistingGist();
+    if (!gistId) return null;
+  }
 
   try {
     const { data } = await axios.get(`${GIST_API}/${gistId}`, {

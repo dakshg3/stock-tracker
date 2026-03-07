@@ -5,17 +5,15 @@ import {
   clearToken,
   getGistId,
   verifyToken,
-  pushToGist,
-  pullFromGist,
   isSyncConfigured,
 } from "../services/gistSync";
 
-export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) {
+export default function SyncSettings({ onClose, onTokenChange }) {
   const [token, setTokenLocal] = useState("");
   const [maskedToken, setMaskedToken] = useState("");
   const [gistId, setGistIdLocal] = useState("");
   const [username, setUsername] = useState("");
-  const [status, setStatus] = useState(""); // idle | verifying | verified | error | pushing | pulling
+  const [status, setStatus] = useState(""); // idle | verifying | verified | error
   const [message, setMessage] = useState("");
   const [configured, setConfigured] = useState(false);
 
@@ -25,7 +23,6 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
       setMaskedToken(`${saved.slice(0, 6)}••••••••${saved.slice(-4)}`);
       setConfigured(true);
       setGistIdLocal(getGistId());
-      // Auto-verify
       verifyToken()
         .then((login) => {
           setUsername(login);
@@ -51,7 +48,8 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
       setConfigured(true);
       setTokenLocal("");
       setStatus("verified");
-      setMessage(`Connected as ${login}`);
+      setMessage(`Connected as ${login} — sync is now automatic!`);
+      onTokenChange?.();
     } catch {
       clearToken();
       setConfigured(false);
@@ -67,43 +65,11 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
     setMaskedToken("");
     setGistIdLocal("");
     setStatus("");
-    setMessage("Disconnected");
+    setMessage("Disconnected — data stays in localStorage only");
+    onTokenChange?.();
   };
 
-  const handlePush = async () => {
-    setStatus("pushing");
-    setMessage("");
-    try {
-      const result = await pushToGist(watchlist, portfolio);
-      setGistIdLocal(result.gistId);
-      setStatus("verified");
-      setMessage(`Data ${result.action} successfully ✓`);
-    } catch (err) {
-      setStatus("error");
-      setMessage(`Push failed: ${err.message}`);
-    }
-  };
-
-  const handlePull = async () => {
-    setStatus("pulling");
-    setMessage("");
-    try {
-      const data = await pullFromGist();
-      if (data) {
-        onPull(data);
-        setStatus("verified");
-        setMessage(`Loaded ${data.watchlist.length} watchlist + ${data.portfolio.length} portfolio items ✓`);
-      } else {
-        setStatus("verified");
-        setMessage("No data found in Gist — push first");
-      }
-    } catch (err) {
-      setStatus("error");
-      setMessage(`Pull failed: ${err.message}`);
-    }
-  };
-
-  const isBusy = status === "verifying" || status === "pushing" || status === "pulling";
+  const isBusy = status === "verifying";
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -111,7 +77,7 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-lg font-bold flex items-center gap-2">
-            <span>⚙️</span> Cloud Sync Settings
+            <span>☁️</span> Cloud Sync
           </h2>
           <button
             onClick={onClose}
@@ -125,10 +91,11 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
         <p className="text-xs text-gray-400 mb-5 leading-relaxed">
           Sync your watchlist & portfolio across devices using a{" "}
           <span className="text-gray-300 font-medium">private GitHub Gist</span>.
-          Your token is stored only in this browser's localStorage.
+          Once connected, sync is <span className="text-green-400 font-medium">fully automatic</span> —
+          every add/remove/edit is pushed to the cloud instantly.
         </p>
 
-        {/* Token input or status */}
+        {/* Connected state */}
         {configured ? (
           <div className="mb-5 space-y-3">
             <div className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-3">
@@ -144,51 +111,37 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
               </div>
             </div>
 
-            {gistId && (
-              <div className="bg-gray-800 rounded-lg px-4 py-2">
-                <p className="text-xs text-gray-500 mb-0.5">Gist ID</p>
-                <a
-                  href={`https://gist.github.com/${gistId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
-                >
-                  {gistId}
-                </a>
+            {/* Auto-sync info */}
+            <div className="bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-3">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <p className="text-xs text-green-400 font-medium">Auto-sync active</p>
               </div>
-            )}
-
-            {/* Sync buttons */}
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={handlePush}
-                disabled={isBusy}
-                className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:cursor-not-allowed"
-              >
-                {status === "pushing" ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="animate-spin inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full" />
-                    Pushing…
-                  </span>
-                ) : (
-                  "↑ Push to Cloud"
-                )}
-              </button>
-              <button
-                onClick={handlePull}
-                disabled={isBusy || !gistId}
-                className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-600/50 text-white rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:cursor-not-allowed"
-              >
-                {status === "pulling" ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="animate-spin inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full" />
-                    Pulling…
-                  </span>
-                ) : (
-                  "↓ Pull from Cloud"
-                )}
-              </button>
+              <p className="text-xs text-gray-400 leading-relaxed">
+                Changes are automatically pushed to the cloud within 2 seconds.
+                Data is pulled from the cloud when you open the app on any device.
+              </p>
             </div>
+
+            {/* View Gist link */}
+            {gistId && (
+              <a
+                href={`https://gist.github.com/${gistId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-between bg-gray-800 hover:bg-gray-750 rounded-lg px-4 py-3 group transition-colors"
+              >
+                <div>
+                  <p className="text-xs text-gray-500 mb-0.5">Your synced data</p>
+                  <p className="text-xs text-blue-400 group-hover:text-blue-300 font-mono">
+                    gist.github.com/{gistId.slice(0, 12)}…
+                  </p>
+                </div>
+                <span className="text-gray-500 group-hover:text-blue-400 transition-colors">
+                  ↗
+                </span>
+              </a>
+            )}
 
             <button
               onClick={handleDisconnect}
@@ -224,7 +177,7 @@ export default function SyncSettings({ watchlist, portfolio, onPull, onClose }) 
                   Verifying…
                 </span>
               ) : (
-                "Connect"
+                "Connect & Enable Auto-Sync"
               )}
             </button>
 
