@@ -5,6 +5,7 @@ const FILENAME = "stock-tracker-data.json";
 const TOKEN_KEY = "stock-tracker-gh-token";
 const GIST_ID_KEY = "stock-tracker-gist-id";
 const LAST_SYNC_KEY = "stock-tracker-last-sync-ts";
+const BASELINE_KEY = "stock-tracker-sync-baseline";
 
 /* ── Token management ── */
 
@@ -20,6 +21,7 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(GIST_ID_KEY);
   localStorage.removeItem(LAST_SYNC_KEY);
+  localStorage.removeItem(BASELINE_KEY);
 }
 
 export function getGistId() {
@@ -37,6 +39,25 @@ function getLastSyncTs() {
 
 function setLastSyncTs(ts) {
   localStorage.setItem(LAST_SYNC_KEY, String(ts));
+}
+
+/**
+ * Baseline = the snapshot of data at the time of last successful sync.
+ * This lets us compute what each side *changed* since the last common state.
+ */
+function getBaseline() {
+  try {
+    return JSON.parse(localStorage.getItem(BASELINE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function setBaseline(watchlist, portfolio) {
+  localStorage.setItem(
+    BASELINE_KEY,
+    JSON.stringify({ watchlist, portfolio })
+  );
 }
 
 function headers() {
@@ -66,66 +87,121 @@ function buildPayload(watchlist, portfolio) {
 }
 
 /**
- * Merge local and remote data.
+ * 3-way merge using the baseline (last-synced snapshot).
  *
- * Strategy – "remote wins on conflicts, union otherwise":
- *  • Watchlist: If the remote explicitly removed a symbol (it was there at
- *    last-sync time but is now gone), honour the delete. Otherwise, union
- *    of both lists preserving remote ordering first.
- *  • Portfolio: keyed by symbol. Remote entry wins when remote is newer.
- *    If remote removed a holding that existed at last sync, honour the
- *    delete. New local holdings that aren't in remote are kept.
+ * For each item we compute:
+ *   localAdded   = in local but NOT in baseline  → local added it
+ *   localRemoved = in baseline but NOT in local   → local deleted it
+ *   remoteAdded  = in remote but NOT in baseline  → remote added it
+ *   remoteRemoved= in baseline but NOT in remote  → remote deleted it
+ *
+ * Result = (baseline ∪ localAdded ∪ remoteAdded) − localRemoved − remoteRemoved
+ *
+ * For portfolio holdings that exist on both sides with different qty/avgPrice,
+ * the side with the newer timestamp wins.
  */
-function merge(local, remote, lastSyncTs) {
-  const remoteIsNewer = remote.lastModified > lastSyncTs;
-
-  // ── Watchlist merge ──
-  const remoteWatchSet = new Set(remote.watchlist);
+function merge(local, remote, baseline) {
+  // ── Watchlist 3-way merge ──
+  const baseWatchSet = new Set(baseline?.watchlist ?? []);
   const localWatchSet = new Set(local.watchlist);
-  const mergedWatch = [...remote.watchlist]; // start with remote
+  const remoteWatchSet = new Set(remote.watchlist);
 
-  for (const sym of local.watchlist) {
-    if (!remoteWatchSet.has(sym)) {
-      // Symbol is in local but not remote.
-      // If remote is newer, that means remote intentionally deleted it → skip.
-      // If remote is older/same, local added it → keep.
-      if (!remoteIsNewer) {
-        mergedWatch.push(sym);
-      }
+  const localAdded = local.watchlist.filter((s) => !baseWatchSet.has(s));
+  const localRemoved = [...baseWatchSet].filter((s) => !localWatchSet.has(s));
+  const remoteAdded = remote.watchlist.filter((s) => !baseWatchSet.has(s));
+  const remoteRemoved = [...baseWatchSet].filter((s) => !remoteWatchSet.has(s));
+
+  const removedSet = new Set([...localRemoved, ...remoteRemoved]);
+  // Start from baseline, add new items from both sides, remove deleted items
+  const mergedWatchSet = new Set([
+    ...(baseline?.watchlist ?? []),
+    ...localAdded,
+    ...remoteAdded,
+  ]);
+  for (const s of removedSet) mergedWatchSet.delete(s);
+
+  // Preserve ordering: remote order first, then any local-only additions
+  const mergedWatch = [];
+  // Items that exist in remote, in remote order
+  for (const s of remote.watchlist) {
+    if (mergedWatchSet.has(s)) {
+      mergedWatch.push(s);
+      mergedWatchSet.delete(s);
     }
   }
-
-  // If a symbol is in remote but not local, and local is newer, local deleted it → remove.
-  const filteredWatch = mergedWatch.filter((sym) => {
-    if (!localWatchSet.has(sym) && !remoteIsNewer) {
-      return false; // local deleted it
+  // Remaining items (local-only additions not in remote)
+  for (const s of local.watchlist) {
+    if (mergedWatchSet.has(s)) {
+      mergedWatch.push(s);
+      mergedWatchSet.delete(s);
     }
-    return true;
-  });
+  }
+  // Any leftovers from baseline (shouldn't happen, but be safe)
+  for (const s of mergedWatchSet) mergedWatch.push(s);
 
-  // ── Portfolio merge ──
-  const remotePortMap = new Map(remote.portfolio.map((h) => [h.symbol, h]));
+  // ── Portfolio 3-way merge ──
+  const basePortMap = new Map((baseline?.portfolio ?? []).map((h) => [h.symbol, h]));
   const localPortMap = new Map(local.portfolio.map((h) => [h.symbol, h]));
+  const remotePortMap = new Map(remote.portfolio.map((h) => [h.symbol, h]));
+
+  const allSymbols = new Set([
+    ...basePortMap.keys(),
+    ...localPortMap.keys(),
+    ...remotePortMap.keys(),
+  ]);
+
   const mergedPort = [];
+  for (const sym of allSymbols) {
+    const inBase = basePortMap.has(sym);
+    const inLocal = localPortMap.has(sym);
+    const inRemote = remotePortMap.has(sym);
 
-  // Start with remote holdings
-  for (const h of remote.portfolio) {
-    // If local removed it and local is newer, skip
-    if (!localPortMap.has(h.symbol) && !remoteIsNewer) continue;
-    mergedPort.push(h);
-  }
+    // Both sides deleted → skip
+    if (!inLocal && !inRemote) continue;
 
-  // Add local-only holdings (not in remote)
-  for (const h of local.portfolio) {
-    if (!remotePortMap.has(h.symbol)) {
-      // If remote is newer, remote intentionally deleted it → skip
-      if (remoteIsNewer) continue;
-      mergedPort.push(h);
+    // Local deleted (was in base, now gone locally) → honour delete
+    if (inBase && !inLocal) continue;
+
+    // Remote deleted (was in base, now gone remotely) → honour delete
+    if (inBase && !inRemote) continue;
+
+    // Both have it → pick the one that changed (or remote if both changed)
+    if (inLocal && inRemote) {
+      const localH = localPortMap.get(sym);
+      const remoteH = remotePortMap.get(sym);
+      const baseH = basePortMap.get(sym);
+
+      // If local changed from baseline and remote didn't → use local
+      // If remote changed from baseline and local didn't → use remote
+      // If both changed → use remote (remote wins ties)
+      const localChanged = !baseH ||
+        localH.qty !== baseH.qty || localH.avgPrice !== baseH.avgPrice;
+      const remoteChanged = !baseH ||
+        remoteH.qty !== baseH.qty || remoteH.avgPrice !== baseH.avgPrice;
+
+      if (localChanged && !remoteChanged) {
+        mergedPort.push(localH);
+      } else {
+        mergedPort.push(remoteH); // remote wins ties
+      }
+      continue;
+    }
+
+    // Only in local (new local add) → keep
+    if (inLocal && !inRemote && !inBase) {
+      mergedPort.push(localPortMap.get(sym));
+      continue;
+    }
+
+    // Only in remote (new remote add) → keep
+    if (inRemote && !inLocal && !inBase) {
+      mergedPort.push(remotePortMap.get(sym));
+      continue;
     }
   }
 
   return {
-    watchlist: filteredWatch,
+    watchlist: mergedWatch,
     portfolio: mergedPort,
   };
 }
@@ -205,20 +281,22 @@ export async function pushToGist(watchlist, portfolio) {
     );
     setGistId(data.id);
     setLastSyncTs(payload.lastModified);
+    setBaseline(watchlist, portfolio);
     return { action: "created", gistId: data.id, merged: null };
   }
 
   // ── Read remote ──
   const remote = await fetchRemotePayload(gistId);
   const lastSyncTs = getLastSyncTs();
+  const baseline = getBaseline();
   let finalWatchlist = watchlist;
   let finalPortfolio = portfolio;
   let merged = null;
 
   if (remote && remote.lastModified && remote.lastModified > lastSyncTs) {
-    // Remote changed since we last synced — merge
+    // Remote changed since we last synced — 3-way merge using baseline
     const local = { watchlist, portfolio };
-    const result = merge(local, remote, lastSyncTs);
+    const result = merge(local, remote, baseline);
     finalWatchlist = result.watchlist;
     finalPortfolio = result.portfolio;
     merged = result; // tell the caller to update local state
@@ -235,6 +313,7 @@ export async function pushToGist(watchlist, portfolio) {
       { headers: headers() }
     );
     setLastSyncTs(payload.lastModified);
+    setBaseline(finalWatchlist, finalPortfolio);
     return { action: "updated", gistId, merged };
   } catch (err) {
     if (err.response?.status === 404) {
@@ -258,15 +337,16 @@ export async function pullFromGist() {
   const remote = await fetchRemotePayload(gistId);
   if (!remote) return null;
 
-  // Update our sync timestamp so future pushes know what we've seen
+  const watchlist = remote.watchlist ?? [];
+  const portfolio = remote.portfolio ?? [];
+
+  // Update our sync timestamp and baseline so future pushes know what we've seen
   if (remote.lastModified) {
     setLastSyncTs(remote.lastModified);
   }
+  setBaseline(watchlist, portfolio);
 
-  return {
-    watchlist: remote.watchlist ?? [],
-    portfolio: remote.portfolio ?? [],
-  };
+  return { watchlist, portfolio };
 }
 
 /**

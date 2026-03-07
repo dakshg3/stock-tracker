@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import AddStock from "./components/AddStock";
 import StockTable from "./components/StockTable";
 import StockDetail from "./components/StockDetail";
-import CsvManager from "./components/CsvManager";
 import AddPortfolioStock from "./components/AddPortfolioStock";
 import PortfolioTable from "./components/PortfolioTable";
 import SyncSettings from "./components/SyncSettings";
@@ -55,6 +54,7 @@ export default function App() {
   const [syncConfigured, setSyncConfigured] = useState(() => isSyncConfigured());
   const timerRef = useRef(null);
   const syncTimerRef = useRef(null);
+  const isPullingRef = useRef(false); // guard: don't push while a pull is updating state
   const { page, symbol, goToStock, goToWatchlist, goToPortfolio } = useHashRoute();
 
   // ── Fetch watchlist quotes ──
@@ -104,8 +104,13 @@ export default function App() {
   // ── Auto-push to Gist (debounced) with merge support ──
   useEffect(() => {
     if (!syncConfigured) return;
+    // Don't push while a pull is updating local state — that would
+    // immediately overwrite the remote with potentially stale data.
+    if (isPullingRef.current) return;
+
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
+      if (isPullingRef.current) return; // double-check after debounce
       try {
         setSyncStatus("syncing");
         const result = await pushToGist(watchlist, portfolio);
@@ -113,12 +118,14 @@ export default function App() {
         // If a merge occurred (remote had newer changes), apply the merged
         // state locally so deletes/adds from the other device take effect.
         if (result.merged) {
+          isPullingRef.current = true; // prevent re-push from this state update
           setWatchlist(result.merged.watchlist);
           setPortfolio(result.merged.portfolio);
+          // Release the guard after React processes the state updates
+          setTimeout(() => { isPullingRef.current = false; }, 100);
         }
 
         setSyncStatus("synced");
-        // fade the "synced" indicator after 3s
         setTimeout(() => setSyncStatus(""), 3000);
       } catch {
         setSyncStatus("error");
@@ -130,17 +137,22 @@ export default function App() {
   // ── Auto-pull from Gist on first load ──
   useEffect(() => {
     if (!syncConfigured) return;
+    isPullingRef.current = true;
     setSyncStatus("syncing");
     pullFromGist()
       .then((data) => {
         if (data) {
-          if (data.watchlist.length > 0) setWatchlist(data.watchlist);
-          if (data.portfolio.length > 0) setPortfolio(data.portfolio);
+          setWatchlist(data.watchlist);
+          setPortfolio(data.portfolio);
         }
         setSyncStatus("synced");
         setTimeout(() => setSyncStatus(""), 3000);
       })
-      .catch(() => setSyncStatus("error"));
+      .catch(() => setSyncStatus("error"))
+      .finally(() => {
+        // Release the guard after React has processed the state updates
+        setTimeout(() => { isPullingRef.current = false; }, 500);
+      });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Watchlist handlers ──
@@ -148,13 +160,6 @@ export default function App() {
   const removeStock = (symbol) => {
     setWatchlist((prev) => prev.filter((s) => s !== symbol));
     setQuotes((prev) => prev.filter((q) => q.symbol !== symbol));
-  };
-  const importCSV = (symbols) => {
-    setWatchlist((prev) => {
-      const merged = [...prev];
-      for (const s of symbols) { if (!merged.includes(s)) merged.push(s); }
-      return merged;
-    });
   };
 
   // ── Portfolio handlers ──
@@ -168,17 +173,6 @@ export default function App() {
       prev.map((h) => (h.symbol === symbol ? { ...h, qty, avgPrice } : h))
     );
   };
-  const importPortfolioCSV = (entries) => {
-    setPortfolio((prev) => {
-      const merged = [...prev];
-      for (const e of entries) {
-        if (!merged.some((h) => h.symbol === e.symbol)) merged.push(e);
-      }
-      return merged;
-    });
-  };
-
-  const isDashboard = page === "watchlist" || page === "portfolio";
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
@@ -195,15 +189,6 @@ export default function App() {
             </h1>
           </button>
           <div className="flex items-center gap-4">
-            {isDashboard && (
-              <CsvManager
-                watchlist={watchlist}
-                onImport={importCSV}
-                portfolio={portfolio}
-                onImportPortfolio={importPortfolioCSV}
-                mode={page}
-              />
-            )}
             <button
               onClick={() => setShowSettings(true)}
               className={`p-2 rounded-lg transition-colors cursor-pointer ${
