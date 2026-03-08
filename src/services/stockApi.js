@@ -122,3 +122,27 @@ export function loadPortfolio() {
 export function savePortfolio(portfolio) {
   localStorage.setItem(PORTFOLIO_KEY, JSON.stringify(portfolio));
 }
+
+/* ── Ticker search / autocomplete ── */
+
+/**
+ * Search Yahoo Finance for tickers matching a query string.
+ * Uses /v1/finance/search which works without auth.
+ * Returns [{ symbol, shortname }] filtered to NSE (.NS) results.
+ */
+export async function searchTickers(query) {
+  if (!query || query.length < 1) return [];
+  const url = `${BASE}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0&listsCount=0`;
+  try {
+    const { data } = await axios.get(`${CORS_PROXY}${encodeURIComponent(url)}`);
+    const quotes = data?.quotes ?? [];
+    return quotes
+      .filter((q) => q.symbol?.endsWith(".NS") || q.exchange === "NSI")
+      .map((q) => ({
+        symbol: q.symbol.endsWith(".NS") ? q.symbol : `${q.symbol}.NS`,
+        shortname: q.shortname || q.longname || q.symbol,
+      }));
+  } catch {
+    return [];
+  }
+}
